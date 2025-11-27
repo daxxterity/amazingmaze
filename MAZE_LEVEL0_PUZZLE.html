@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Single L Tile – Simplified Canonical Rotation</title>
+  <style>
+    body {
+      background: #1c1c1c;
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, sans-serif;
+    }
+    .frame {
+      background: #202020;
+      padding: 16px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    canvas {
+      background: #111111;
+      border: 4px solid #f5f5f5;
+      display: block;
+    }
+    .label {
+      color: #f5f5f5;
+      margin-top: 8px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <canvas id="game" width="500" height="500"></canvas>
+    <div class="label">Arrow keys to move. Test L tile at the center (logic-focused).</div>
+  </div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  const TILE_COUNT = 5;
+  const QUADS_PER_TILE = 2;
+  const GRID_QUADS = TILE_COUNT * QUADS_PER_TILE; // 10
+  const TILE_SIZE = canvas.width / TILE_COUNT;    // 100
+  const QUAD_SIZE = TILE_SIZE / QUADS_PER_TILE;   // 50
+
+  // Quadrants: Q1 Q2 / Q3 Q4
+  function quadIndex(localQx, localQy) {
+    if (localQx === 0 && localQy === 0) return 1;
+    if (localQx === 1 && localQy === 0) return 2;
+    if (localQx === 0 && localQy === 1) return 3;
+    return 4;
+  }
+
+  function classifyRotDir(fromQuad, toQuad) {
+    // +1 = CW, -1 = CCW
+    const p = fromQuad + '->' + toQuad;
+    switch (p) {
+      case '1->2':
+      case '4->3':
+      case '2->4':
+      case '3->1':
+        return +1;
+      case '3->4':
+      case '2->1':
+      case '1->3':
+      case '4->2':
+        return -1;
+      default:
+        return 0;
+    }
+  }
+
+  // L orientations for drawing only:
+
+  function hasWallBetween(tile, fromQuad, toQuad) {
+    const state = L_STATES[tile.stateIndex] || L_STATES[0];
+    const [up, right, down, left] = state;
+    const p = fromQuad + '->' + toQuad;
+    switch (p) {
+      case '1->2':
+      case '2->1':
+        return up === 1;
+      case '3->4':
+      case '4->3':
+        return down === 1;
+      case '1->3':
+      case '3->1':
+        return left === 1;
+      case '2->4':
+      case '4->2':
+        return right === 1;
+      default:
+        return false;
+    }
+  }
+  // 0: Up+Right
+  // 1: Right+Down (CW)
+  // 3: Left+Up (CCW)
+  const L_STATES = {
+    0: [1,1,0,0], // Up,Right
+    1: [0,1,1,0], // Right,Down
+    3: [1,0,0,1]  // Left,Up
+  };
+
+  const BAR_STATES = {
+    0: [1,0,1,0], // vertical: up+down
+    1: [0,1,0,1]  // horizontal: left+right
+  };
+
+  function makeEmptyTile() {
+    return { type: 'empty' };
+  }
+
+  function makeLTile() {
+    return {
+      type: 'L',
+      stateIndex: 0,      // default = 0
+      isMoved: false,
+      lastRotDir: 0       // +1 or -1
+    };
+  }
+
+  function makeBarTile() {
+    return {
+      type: 'BAR',
+      stateIndex: 0,      // 0 = vertical, 1 = horizontal
+      isMoved: false,
+      lastRotDir: 0
+    };
+  }
+
+  function makeWallTile() {
+    return {
+      type: 'WALL'
+    };
+  }
+
+  function makeExitTile() {
+    return {
+      type: 'EXIT'
+    };
+  }
+
+  // Build grid of tiles for Level 0 (medium puzzle)
+  const tiles = [];
+  for (let ty = 0; ty < TILE_COUNT; ty++) {
+    tiles[ty] = [];
+    for (let tx = 0; tx < TILE_COUNT; tx++) {
+      tiles[ty][tx] = makeEmptyTile();
+    }
+  }
+  const centerX = 2;
+  const centerY = 2;
+
+  // Moving tiles
+  tiles[centerY][centerX] = makeLTile();            // middle L
+  tiles[centerY - 1][centerX] = makeBarTile();      // bar above
+  tiles[centerY + 1][centerX] = makeBarTile();      // bar below
+  tiles[centerY][centerX - 1] = makeLTile();        // L to the left
+  tiles[centerY][centerX + 1] = makeBarTile();      // bar to the right
+
+  // Static walls forming simple corridors
+  tiles[1][0] = makeWallTile();
+  tiles[1][1] = makeWallTile();
+  tiles[3][3] = makeWallTile();
+  tiles[4][2] = makeWallTile();
+
+  // Exit at top-right corner tile
+  tiles[0][4] = makeExitTile();
+
+  // Player starts near bottom-left
+  const player = {
+    qx: 1, // quadrant coords
+    qy: 9
+  };
+
+  function getTileAtQuad(qx, qy) {
+    const tx = Math.floor(qx / QUADS_PER_TILE);
+    const ty = Math.floor(qy / QUADS_PER_TILE);
+    if (tx < 0 || ty < 0 || tx >= TILE_COUNT || ty >= TILE_COUNT) return null;
+    return { tile: tiles[ty][tx], tx, ty };
+  }
+
+  function hasWallBetweenBar(tile, fromQuad, toQuad) {
+    const state = BAR_STATES[tile.stateIndex] || BAR_STATES[0];
+    const [up, right, down, left] = state;
+    // vertical orientation blocks horizontal neighbors in same row
+    // horizontal orientation blocks vertical neighbors in same column
+    if (tile.stateIndex === 0) { // vertical
+      if ((fromQuad === 1 && toQuad === 2) || (fromQuad === 2 && toQuad === 1) ||
+          (fromQuad === 3 && toQuad === 4) || (fromQuad === 4 && toQuad === 3)) {
+        return true;
+      }
+      return false;
+    } else { // horizontal
+      if ((fromQuad === 1 && toQuad === 3) || (fromQuad === 3 && toQuad === 1) ||
+          (fromQuad === 2 && toQuad === 4) || (fromQuad === 4 && toQuad === 2)) {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  function attemptMove(dx, dy) {
+    const nx = player.qx + dx;
+    const ny = player.qy + dy;
+    if (nx < 0 || ny < 0 || nx >= GRID_QUADS || ny >= GRID_QUADS) return;
+
+    const fromInfo = getTileAtQuad(player.qx, player.qy);
+    const toInfo   = getTileAtQuad(nx, ny);
+    if (!fromInfo || !toInfo) return;
+
+    const sameTile = (fromInfo.tx === toInfo.tx && fromInfo.ty === toInfo.ty);
+    const tile = fromInfo.tile;
+
+    const localQx = player.qx % QUADS_PER_TILE;
+    const localQy = player.qy % QUADS_PER_TILE;
+    const localNx = nx % QUADS_PER_TILE;
+    const localNy = ny % QUADS_PER_TILE;
+    // Handle impassable WALL destination
+    if (toInfo.tile.type === 'WALL') {
+      return;
+    }
+
+    const fromQuad = quadIndex(localQx, localQy);
+    const toQuad   = quadIndex(localNx, localNy);
+
+    if (tile.type === 'L' && sameTile) {
+      const rotDir = classifyRotDir(fromQuad, toQuad);
+      // Determine if there is actually a wall between these two quads
+      const pushingWall = hasWallBetween(tile, fromQuad, toQuad);
+
+      if (!pushingWall) {
+        // No wall here: simple movement, no rotation
+        player.qx = nx;
+        player.qy = ny;
+        return;
+      }
+
+      if (rotDir === 0) {
+        // Not a valid rotational direction; blocked by wall
+        return;
+      }
+
+      if (!tile.isMoved) {
+        // First push from default: rotate based on direction and move player
+        tile.isMoved = true;
+        tile.lastRotDir = rotDir;
+        tile.stateIndex = (rotDir === 1 ? 1 : 3); // CW -> 1, CCW -> 3
+        player.qx = nx;
+        player.qy = ny;
+      } else {
+        // Already moved: only opposite direction returns to default
+        if (rotDir === -tile.lastRotDir) {
+          tile.isMoved = false;
+          tile.lastRotDir = 0;
+          tile.stateIndex = 0; // back to default
+          player.qx = nx;
+          player.qy = ny;
+        } else {
+          // Same-direction push while moved: blocked
+          return;
+        }
+      }
+      return;
+    }
+
+    if (tile.type === 'BAR' && sameTile) {
+      const rotDirBar = classifyRotDir(fromQuad, toQuad);
+      const pushingWallBar = hasWallBetweenBar(tile, fromQuad, toQuad);
+
+      if (!pushingWallBar) {
+        // no wall between these quads: move freely
+        player.qx = nx;
+        player.qy = ny;
+        return;
+      }
+
+      if (rotDirBar === 0) {
+        // blocked by bar but not a valid push direction
+        return;
+      }
+
+      if (!tile.isMoved) {
+        tile.isMoved = true;
+        tile.lastRotDir = rotDirBar;
+        tile.stateIndex = (tile.stateIndex === 0 ? 1 : 0); // toggle orientation
+        if (!hasWallBetweenBar(tile, fromQuad, toQuad)) {
+          player.qx = nx;
+          player.qy = ny;
+        }
+      } else {
+        if (rotDirBar === -tile.lastRotDir) {
+          tile.isMoved = false;
+          tile.lastRotDir = 0;
+          tile.stateIndex = (tile.stateIndex === 0 ? 1 : 0); // toggle back
+          if (!hasWallBetweenBar(tile, fromQuad, toQuad)) {
+            player.qx = nx;
+            player.qy = ny;
+          }
+        } else {
+          return;
+        }
+      }
+      return;
+    }
+
+    // All other tiles or EXIT behave as free move
+    player.qx = nx;
+    player.qy = ny;
+    if (toInfo.tile.type === 'EXIT') {
+      alert('Exit reached!');
+    }
+  }
+
+  function drawGrid() {
+    // tile boundaries
+    ctx.strokeStyle = '#2f7f4f';
+    ctx.lineWidth = 2;
+    for (let i = 0; i <= TILE_COUNT; i++) {
+      const p = i * TILE_SIZE;
+      ctx.beginPath();
+      ctx.moveTo(p, 0);
+      ctx.lineTo(p, canvas.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, p);
+      ctx.lineTo(canvas.width, p);
+      ctx.stroke();
+    }
+
+    // quadrant lines
+    ctx.strokeStyle = '#552266';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= GRID_QUADS; i++) {
+      const p = i * QUAD_SIZE;
+      ctx.beginPath();
+      ctx.moveTo(p, 0);
+      ctx.lineTo(p, canvas.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, p);
+      ctx.lineTo(canvas.width, p);
+      ctx.stroke();
+    }
+  }
+
+  function drawTiles() {
+    for (let ty = 0; ty < TILE_COUNT; ty++) {
+      for (let tx = 0; tx < TILE_COUNT; tx++) {
+        const tile = tiles[ty][tx];
+        const baseX = tx * TILE_SIZE;
+        const baseY = ty * TILE_SIZE;
+        if (tile.type === 'L') {
+          ctx.fillStyle = '#222';
+          ctx.fillRect(baseX, baseY, TILE_SIZE, TILE_SIZE);
+
+          const cx = baseX + TILE_SIZE / 2;
+          const cy = baseY + TILE_SIZE / 2;
+
+          const state = L_STATES[tile.stateIndex] || L_STATES[0];
+          const [up, right, down, left] = state;
+
+          ctx.strokeStyle = (tile.isMoved ? '#ff8800' : '#00aaff');
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          if (up) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx, baseY);
+          }
+          if (right) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(baseX + TILE_SIZE, cy);
+          }
+          if (down) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx, baseY + TILE_SIZE);
+          }
+          if (left) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(baseX, cy);
+          }
+          ctx.stroke();
+        }
+
+        else if (tile.type === 'BAR') {
+          ctx.fillStyle = '#222';
+          ctx.fillRect(baseX, baseY, TILE_SIZE, TILE_SIZE);
+
+          const cx = baseX + TILE_SIZE / 2;
+          const cy = baseY + TILE_SIZE / 2;
+
+          const stateBar = BAR_STATES[tile.stateIndex] || BAR_STATES[0];
+          const [upB, rightB, downB, leftB] = stateBar;
+
+          ctx.strokeStyle = (tile.isMoved ? '#ff8800' : '#00aaff');
+          ctx.lineWidth = 6;
+          ctx.beginPath();
+          if (upB) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx, baseY);
+          }
+          if (rightB) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(baseX + TILE_SIZE, cy);
+          }
+          if (downB) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(cx, baseY + TILE_SIZE);
+          }
+          if (leftB) {
+            ctx.moveTo(cx, cy);
+            ctx.lineTo(baseX, cy);
+          }
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  function drawPlayer() {
+    const px = player.qx * QUAD_SIZE + QUAD_SIZE / 2;
+    const py = player.qy * QUAD_SIZE + QUAD_SIZE / 2;
+    ctx.fillStyle = '#55ff55';
+    ctx.beginPath();
+    ctx.arc(px, py, QUAD_SIZE * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawGrid();
+    drawTiles();
+    drawPlayer();
+    requestAnimationFrame(draw);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp') attemptMove(0,-1);
+    else if (e.key === 'ArrowDown') attemptMove(0,1);
+    else if (e.key === 'ArrowLeft') attemptMove(-1,0);
+    else if (e.key === 'ArrowRight') attemptMove(1,0);
+  });
+
+  draw();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Rotating Wall Maze – Quadrants</title>
+  <style>
+    body {
+      background: #f3e7d7;
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, sans-serif;
+    }
+    .frame {
+      background: #202020;
+      padding: 16px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    canvas {
+      background: #111111;
+      border: 4px solid #f5f5f5;
+      display: block;
+    }
+    .info {
+      color: #f5f5f5;
+      margin-top: 8px;
+      font-size: 13px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+<div class="frame">
+  <canvas id="game" width="400" height="400"></canvas>
+  <div class="info">
+    Move with WASD / Arrow keys (<b>per quadrant</b>).<br>
+    Push blue/orange bars: once forward (CW), once back (CCW).
+  </div>
+</div>
+
+<script>
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  const TILE_COUNT = 5;
+  const TILE_SIZE  = canvas.width / TILE_COUNT;
+  const QUADS_PER_TILE = 2;
+  const GRID_QUADS = TILE_COUNT * QUADS_PER_TILE;
+  const QUAD_SIZE  = TILE_SIZE / QUADS_PER_TILE;
+
+  const UP = 0, RIGHT = 1, DOWN = 2, LEFT = 3;
+
+  function makeTile(solid, moving) {
+    return {
+      solidWalls: solid.slice(),
+      movingWalls: moving.slice(),
+      isMoved: false,
+      lastPushDir: null,
+      lastArmDir: null,
+      lastRotDir: null  // 'CW' or 'CCW'
+    };
+  }
+
+  const grid = [];
+  for (let ty = 0; ty < TILE_COUNT; ty++) {
+    grid[ty] = [];
+    for (let tx = 0; tx < TILE_COUNT; tx++) {
+      grid[ty][tx] = makeTile([0,0,0,0], [0,0,0,0]);
+    }
+  }
+
+  // Single test tile at center (C3)
+  grid[2][2] = makeTile([0,0,0,0], [1,0,1,0]);  // vertical bar spanning the tile
+  let player = { qx: 0, qy: 0 };
+  const goal  = { qx: GRID_QUADS - 1, qy: GRID_QUADS - 1 };
+
+  function rotateCWDir(d)   { return (d + 1) & 3; }
+  function rotateCCWDir(d)  { return (d + 3) & 3; }
+
+  function rotateCW(arr) {
+    return [arr[3], arr[0], arr[1], arr[2]];
+  }
+
+  function rotateCCW(arr) {
+    return [arr[1], arr[2], arr[3], arr[0]];
+  }
+
+  function rotateTileForward(tx, ty, pushDir, armDir) {
+    const tile = grid[ty][tx];
+    if (!tile || tile.isMoved) return false;
+
+    const newMoving = rotateCW(tile.movingWalls);
+
+    for (let d = 0; d < 4; d++) {
+      if (newMoving[d] && tile.solidWalls[d]) return false;
+    }
+
+    tile.movingWalls = newMoving;
+    tile.isMoved = true;
+    tile.lastPushDir = pushDir;
+    tile.lastArmDir  = armDir;
+    return true;
+  }
+
+  function rotateTileBack(tx, ty) {
+    const tile = grid[ty][tx];
+    if (!tile || !tile.isMoved) return false;
+
+    const newMoving = rotateCCW(tile.movingWalls);
+
+    for (let d = 0; d < 4; d++) {
+      if (newMoving[d] && tile.solidWalls[d]) return false;
+    }
+
+    tile.movingWalls = newMoving;
+    tile.isMoved = false;
+    tile.lastPushDir = null;
+    tile.lastArmDir  = null;
+    return true;
+  }
+
+  function getBlockingDirWithinTile(tile, localQx, localQy, dx, dy) {
+    if (dx !== 0) {
+      if ((dx === 1 && localQx === 0) || (dx === -1 && localQx === 1)) {
+        const arm = (localQy === 0) ? UP : DOWN;
+        if (tile.solidWalls[arm] || tile.movingWalls[arm]) return arm;
+      }
+    } else if (dy !== 0) {
+      if ((dy === 1 && localQy === 0) || (dy === -1 && localQy === 1)) {
+        const arm = (localQx === 0) ? LEFT : RIGHT;
+        if (tile.solidWalls[arm] || tile.movingWalls[arm]) return arm;
+      }
+    }
+    return null;
+  }
+
+  function boundaryArmForMovement(localQx, localQy, dx, dy) {
+    if (dx !== 0) {
+      if ((dx === 1 && localQx === 0) || (dx === -1 && localQx === 1)) {
+        return (localQy === 0) ? UP : DOWN;
+      }
+    } else if (dy !== 0) {
+      if ((dy === 1 && localQy === 0) || (dy === -1 && localQy === 1)) {
+        return (localQx === 0) ? LEFT : RIGHT;
+      }
+    }
+    return null;
+  }
+
+  // Determine rotation direction (CW or CCW) for a push within a tile,
+  // based on quadrant movement.
+  // Quadrant mapping: (0,0)=Q1, (1,0)=Q2, (0,1)=Q3, (1,1)=Q4
+  function rotationDirForQuadrantMove(localQx, localQy, dx, dy) {
+    const fromQ =
+      (localQx === 0 && localQy === 0) ? 1 :
+      (localQx === 1 && localQy === 0) ? 2 :
+      (localQx === 0 && localQy === 1) ? 3 :
+      (localQx === 1 && localQy === 1) ? 4 : null;
+
+    const toQx = localQx + dx;
+    const toQy = localQy + dy;
+    const toQ =
+      (toQx === 0 && toQy === 0) ? 1 :
+      (toQx === 1 && toQy === 0) ? 2 :
+      (toQx === 0 && toQy === 1) ? 3 :
+      (toQx === 1 && toQy === 1) ? 4 : null;
+
+    if (fromQ === null || toQ === null) return null;
+
+    // CW moves:
+    // Q1->Q2, Q4->Q3, Q3->Q1, Q2->Q4
+    if ((fromQ === 1 && toQ === 2) ||
+        (fromQ === 4 && toQ === 3) ||
+        (fromQ === 3 && toQ === 1) ||
+        (fromQ === 2 && toQ === 4)) {
+      return "CW";
+    }
+
+    // CCW moves:
+    // Q3->Q4, Q2->Q1, Q1->Q3, Q4->Q2
+    if ((fromQ === 3 && toQ === 4) ||
+        (fromQ === 2 && toQ === 1) ||
+        (fromQ === 1 && toQ === 3) ||
+        (fromQ === 4 && toQ === 2)) {
+      return "CCW";
+    }
+
+    return null;
+  }
+
+
+  function attemptMove(dir) {
+    let dx = 0, dy = 0;
+    if (dir === UP) dy = -1;
+    if (dir === DOWN) dy = 1;
+    if (dir === LEFT) dx = -1;
+    if (dir === RIGHT) dx = 1;
+
+    const qx = player.qx;
+    const qy = player.qy;
+    const nx = qx + dx;
+    const ny = qy + dy;
+
+    if (nx < 0 || nx >= GRID_QUADS || ny < 0 || ny >= GRID_QUADS) {
+      draw();
+      return;
+    }
+
+    const tileFromX = Math.floor(qx / QUADS_PER_TILE);
+    const tileFromY = Math.floor(qy / QUADS_PER_TILE);
+    const tileToX   = Math.floor(nx / QUADS_PER_TILE);
+    const tileToY   = Math.floor(ny / QUADS_PER_TILE);
+
+    if (tileFromX !== tileToX || tileFromY !== tileToY) {
+      player.qx = nx;
+      player.qy = ny;
+      draw();
+      return;
+    }
+
+    const tile = grid[tileFromY][tileFromX];
+    const localQx = qx % QUADS_PER_TILE;
+    const localQy = qy % QUADS_PER_TILE;
+
+    // Check if there's currently a wall blocking this move
+    const blockingDir = getBlockingDirWithinTile(tile, localQx, localQy, dx, dy);
+
+    // CASE 1: There IS a wall blocking
+    if (blockingDir !== null) {
+      const isMoving = tile.movingWalls[blockingDir] === 1;
+      const isSolid = tile.solidWalls[blockingDir] === 1;
+
+      // Can't push solid walls
+      if (isSolid) {
+        draw();
+        return;
+      }
+
+      if (isMoving) {
+        // Determine conceptual rotation direction (CW or CCW)
+        const rotDir = rotationDirForQuadrantMove(localQx, localQy, dx, dy);
+        if (!rotDir) {
+          draw();
+          return;
+        }
+
+        let rotated = false;
+
+        // First time this wall is pushed from default state
+        if (!tile.isMoved) {
+          tile.lastRotDir = rotDir; // remember whether this was CW or CCW conceptually
+          rotated = rotateTileForward(tileFromX, tileFromY, dir, blockingDir);
+        } else {
+          // Wall is already in 'moved' state. We only allow a push
+          // if the conceptual rotation is opposite to the original push.
+          if (rotDir === tile.lastRotDir) {
+            // Same direction as before -> ignore
+            draw();
+            return;
+          }
+          // Opposite direction -> rotate back to default
+          rotated = rotateTileBack(tileFromX, tileFromY);
+          tile.lastRotDir = null;
+        }
+
+        if (rotated) {
+          // After rotation, check if path is clear and move player if so
+          const newBlock = getBlockingDirWithinTile(tile, localQx, localQy, dx, dy);
+          if (newBlock === null) {
+            player.qx = nx;
+            player.qy = ny;
+          }
+        }
+        draw();
+        return;
+      }
+
+      // If we get here, wall is blocking but can't be rotated
+      draw();
+      return;
+
+      draw();
+      return;
+    }
+
+    // CASE 2: Normal move (no rotation involved)
+    player.qx = nx;
+    player.qy = ny;
+    draw();
+  }
+
+  const keyMap = {
+    ArrowUp: UP, KeyW: UP,
+    ArrowRight: RIGHT, KeyD: RIGHT,
+    ArrowDown: DOWN, KeyS: DOWN,
+    ArrowLeft: LEFT, KeyA: LEFT
+  };
+
+  window.addEventListener("keydown", (e) => {
+    const dir = keyMap[e.code];
+    if (dir !== undefined) {
+      e.preventDefault();
+      attemptMove(dir);
+    }
+  });
+
+  function drawTile(tx, ty, tile) {
+    const px = tx * TILE_SIZE;
+    const py = ty * TILE_SIZE;
+
+    ctx.fillStyle = "#222222";
+    ctx.fillRect(px, py, TILE_SIZE, TILE_SIZE);
+
+    ctx.strokeStyle = "#61e27a";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(px, py, TILE_SIZE, TILE_SIZE);
+
+    ctx.save();
+    ctx.strokeStyle = "#9b69e0";
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(px + TILE_SIZE / 2, py);
+    ctx.lineTo(px + TILE_SIZE / 2, py + TILE_SIZE);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(px, py + TILE_SIZE / 2);
+    ctx.lineTo(px + TILE_SIZE, py + TILE_SIZE / 2);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 7;
+    drawArms(px, py, tile.solidWalls);
+
+    ctx.strokeStyle = tile.isMoved ? "#ffb347" : "#35a9ff";
+    ctx.lineWidth = 4;
+    drawArms(px, py, tile.movingWalls);
+
+    if (tile.movingWalls.some(v => v)) {
+      const cx = px + TILE_SIZE / 2;
+      const cy = py + TILE_SIZE / 2;
+      ctx.fillStyle = "#d0d0d0";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawArms(px, py, walls) {
+    const s  = TILE_SIZE;
+    const cx = px + s / 2;
+    const cy = py + s / 2;
+
+    if (walls[UP]) {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx, py);
+      ctx.stroke();
+    }
+    if (walls[RIGHT]) {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(px + s, cy);
+      ctx.stroke();
+    }
+    if (walls[DOWN]) {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx, py + s);
+      ctx.stroke();
+    }
+    if (walls[LEFT]) {
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(px, cy);
+      ctx.stroke();
+    }
+  }
+
+  function drawPlayer() {
+    const cx = (player.qx + 0.5) * QUAD_SIZE;
+    const cy = (player.qy + 0.5) * QUAD_SIZE;
+    const radius = QUAD_SIZE * 0.35;
+
+    ctx.fillStyle = "#00ff6a";
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawGoal() {
+    const cx = (goal.qx + 0.5) * QUAD_SIZE;
+    const cy = (goal.qy + 0.5) * QUAD_SIZE;
+    const radius = QUAD_SIZE * 0.35;
+
+    ctx.strokeStyle = "#ff4fa0";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (let ty = 0; ty < TILE_COUNT; ty++) {
+      for (let tx = 0; tx < TILE_COUNT; tx++) {
+        drawTile(tx, ty, grid[ty][tx]);
+      }
+    }
+    drawGoal();
+    drawPlayer();
+  }
+
+  draw();
+</script>
+</body>
+</html>
