@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Combined Board</title>
+<style>
+body{background:#111;margin:0;display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh}
+canvas{background:#000;border:4px solid #fff}
+</style>
+</head>
+<body>
+<canvas id="c" width="600" height="600"></canvas>
+<div style="color:#eee;font-family:sans-serif;font-size:14px;margin-top:8px;width:600px;max-width:600px;text-align:right">
+  <p>Use the arrow keys to move Player 1 (green). Use <strong>WASD</strong> to move Player 2 (yellow) after spawning with the <strong>2P</strong> button. Reach the pink EXIT tile. Click any tile to cycle between static walls, L-walls, bar-walls and exit.</p>
+  <p>You can export and edit the maze layout as JSON below. Press <strong>X</strong> or click &quot;Export&quot; to dump the current maze.</p>
+  <textarea id="mazeJson" rows="8" style="width:100%;background:#111;color:#eee;border:1px solid #555;font-family:monospace;font-size:12px;"></textarea>
+  <div style="margin-top:4px;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-start">
+    <button id="exportBtn">Export</button>
+    <button id="copyBtn">Copy</button>
+    <button id="applyBtn">Apply</button>
+    <button id="spawn2pBtn">2P</button>
+    <button id="restartBtn" style="margin-left:auto">Refresh</button>
+  </div>
+</div>
+<script>
+const T=5,Q=2,S=100,qS=50;
+const ctx=document.getElementById('c').getContext('2d');
+
+const OFFSET_X=40, OFFSET_Y=40;
+let exitReached=false;
+
+let initialMazeJson=null;
+
+function rot(w){return[w[3],w[0],w[1],w[2]];}
+const SHAPES={
+ C:[1,1,1,1],
+ TD:[0,1,1,1],
+ CO:[1,0,0,1],
+ H:[0,1,0,1],
+ V:[1,0,1,0]
+};
+const KEYS=Object.keys(SHAPES);
+
+function makeStatic(){
+ let k=KEYS[Math.floor(Math.random()*KEYS.length)];
+ let w=SHAPES[k].slice();
+ let r=Math.floor(Math.random()*4);
+ while(r--)w=rot(w);
+ return{type:'STATIC',walls:w};
+}
+
+function makeL(){return{type:'L',st:0,moved:false,last:0};}
+function makeB(){return{type:'BAR',st:0,moved:false,last:0};}
+
+const LST={
+ 0:[1,1,0,0],
+ 1:[0,1,1,0],
+ 3:[1,0,0,1]
+};
+const BST={
+ 0:[1,0,1,0],
+ 1:[0,1,0,1]
+};
+
+let tiles=[...Array(T)].map(_=>Array(T).fill(0).map(_=>makeStatic()));
+
+initialMazeJson = serializeMaze();
+
+tiles[2][2]=makeL();
+tiles[1][2]=makeB();
+tiles[3][2]=makeB();
+tiles[2][1]=makeL();
+tiles[2][3]=makeB();
+
+tiles[0][4]={type:'EXIT'};
+
+let px=1,py=9; let p2x=null,p2y=null;
+
+function tileAt(qx,qy){
+ let tx=Math.floor(qx/Q),ty=Math.floor(qy/Q);
+ if(tx<0||ty<0||tx>=T||ty>=T)return null;
+ return{tile:tiles[ty][tx],tx,ty};
+}
+
+function quad(qx,qy){
+ let lx=qx%Q,ly=qy%Q;
+ if(lx==0&&ly==0)return 1;
+ if(lx==1&&ly==0)return 2;
+ if(lx==0&&ly==1)return 3;
+ return 4;
+}
+
+function rotDir(a,b){
+ const s=a+"->"+b;
+ if(["1->2","4->3","2->4","3->1"].includes(s))return 1;
+ if(["3->4","2->1","1->3","4->2"].includes(s))return -1;
+ return 0;
+}
+
+function blockStatic(tile,lx,ly,dx,dy){
+ let w=tile.walls;
+ if(dx!==0){
+   if((dx==1&&lx==0)||(dx==-1&&lx==1)){
+     return w[(ly==0)?0:2]==1;
+   }
+ }
+ if(dy!==0){
+   if((dy==1&&ly==0)||(dy==-1&&ly==1)){
+     return w[(lx==0)?3:1]==1;
+   }
+ }
+ return false;
+}
+
+function hasLWallBetween(tile,q1,q2){
+ let w=LST[tile.st];
+ function pair(a,b){return (q1===a&&q2===b)||(q1===b&&q2===a);}
+ // up arm blocks between Q1 and Q2
+ if(w[0] && pair(1,2)) return true;
+ // right arm blocks between Q2 and Q4
+ if(w[1] && pair(2,4)) return true;
+ // down arm blocks between Q3 and Q4
+ if(w[2] && pair(3,4)) return true;
+ // left arm blocks between Q1 and Q3
+ if(w[3] && pair(1,3)) return true;
+ return false;
+}
+
+function tryMove(dx,dy){
+ let nx=px+dx, ny=py+dy;
+ if(nx<0||ny<0||nx>=10||ny>=10)return;
+ let A=tileAt(px,py),B=tileAt(nx,ny);
+ if(!A||!B)return;
+ let same=A.tx==B.tx&&A.ty==B.ty;
+ let tile=A.tile;
+ let lx=px%2,ly=py%2;
+ let nlx=nx%2,nly=ny%2;
+ let q1=quad(px,py),q2=quad(nx,ny);
+
+ if(B.tile.type=='EXIT'){
+  // Only celebrate when entering EXIT's bottom-right quadrant (Q4)
+  if(nlx===1 && nly===1){
+    px=nx;py=ny;
+    exitReached=true;
+  } else {
+    px=nx;py=ny;
+  }
+  return;
+ }
+
+ if(tile.type=='STATIC'&&same){
+   if(blockStatic(tile,lx,ly,dx,dy))return;
+   px=nx;py=ny;return;
+ }
+
+ if(tile.type=='L'&&same){
+   // Only rotate when the movement actually pushes against one of the L arms
+   if(!hasLWallBetween(tile,q1,q2)){
+     // no wall between these quadrants -> just walk through
+     px=nx;py=ny;return;
+   }
+   let d=rotDir(q1,q2);
+   if(d==0)return;
+   if(!tile.moved){
+     tile.moved=true;tile.last=d;
+     tile.st=(d==1?1:3);
+     px=nx;py=ny;return;
+   }else{
+     if(d==-tile.last){
+       tile.moved=false;tile.last=0;tile.st=0;
+       px=nx;py=ny;
+     }
+     return;
+   }
+ }
+
+ if(tile.type=='BAR'&&same){
+   let d=rotDir(q1,q2);
+   let w=BST[tile.st];
+   function blockBar(){
+     if(tile.st==0) return (q1==1&&q2==2)||(q1==2&&q2==1)||(q1==3&&q2==4)||(q1==4&&q2==3);
+     else return (q1==1&&q2==3)||(q1==3&&q2==1)||(q1==2&&q2==4)||(q1==4&&q2==2);
+   }
+   if(!blockBar()){px=nx;py=ny;return;}
+   if(d==0)return;
+   if(!tile.moved){
+     tile.moved=true;tile.last=d;tile.st=1-tile.st;px=nx;py=ny;return;
+   }else{
+     if(d==-tile.last){tile.moved=false;tile.last=0;tile.st=1-tile.st;px=nx;py=ny;}
+     return;
+   }
+ }
+
+ px=nx;py=ny;
+}
+
+function drawLabels(){
+ ctx.fillStyle='#ffffff';
+ ctx.font='14px sans-serif';
+
+ // column letters above board
+ ctx.textAlign='center';
+ ctx.textBaseline='bottom';
+ const letters=['A','B','C','D','E'];
+ for(let x=0;x<T;x++){
+   const cx = OFFSET_X + x*S + S/2;
+   const cy = OFFSET_Y - 6;
+   ctx.fillText(letters[x], cx, cy);
+ }
+
+ // row numbers to the left of board
+ ctx.textAlign='right';
+ ctx.textBaseline='middle';
+ for(let y=0;y<T;y++){
+   const cy = OFFSET_Y + y*S + S/2;
+   const label = (y+1).toString();
+   const xPos = OFFSET_X - 6;
+   ctx.fillText(label, xPos, cy);
+ }
+}
+
+function draw(){
+ ctx.clearRect(0,0,600,600);
+
+ // draw board with offset
+ ctx.save();
+ ctx.translate(OFFSET_X, OFFSET_Y);
+
+ for(let y=0;y<T;y++){
+  for(let x=0;x<T;x++){
+   let t=tiles[y][x],bx=x*S,by=y*S;
+   ctx.fillStyle='#333';ctx.fillRect(bx,by,S,S);
+
+   if(t.type=='STATIC'){
+     ctx.strokeStyle='#000';ctx.lineWidth=6;
+     ctx.beginPath();
+     let w=t.walls;
+     let cx=bx+S/2,cy=by+S/2;
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='L'){
+     let w=LST[t.st],cx=bx+S/2,cy=by+S/2;
+     ctx.strokeStyle=t.moved?'#ffa500':'#00aaff';
+     ctx.lineWidth=6;
+     ctx.beginPath();
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='BAR'){
+     let w=BST[t.st],cx=bx+S/2,cy=by+S/2;
+     ctx.strokeStyle=t.moved?'#ffa500':'#00aaff';
+     ctx.lineWidth=6;
+     ctx.beginPath();
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='EXIT'){
+     ctx.fillStyle='#ff66cc';
+     ctx.fillRect(bx+S/2,by+S/2,S/2,S/2);
+   }
+  }
+ }
+
+ // player
+ let pxs=px*qS+qS/2,pys=py*qS+qS/2;
+ ctx.fillStyle='#0f0';
+ ctx.beginPath();
+ ctx.arc(pxs,pys,qS*0.3,0,Math.PI*2);
+ ctx.fill();
+
+ ctx.restore();
+ if(p2x!==null && p2y!==null){
+  let p2xs=p2x*qS+qS/2,p2ys=p2y*qS+qS/2;
+  ctx.save();
+  ctx.translate(OFFSET_X, OFFSET_Y);
+  ctx.fillStyle='#ffcc00';
+  ctx.beginPath();
+  ctx.arc(p2xs,p2ys,qS*0.3,0,Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+ }
+
+
+ // labels and exit overlay drawn in full canvas space
+ drawLabels();
+
+ if(exitReached){
+   ctx.fillStyle='rgba(255,102,204,0.2)';
+   ctx.fillRect(OFFSET_X, OFFSET_Y, T*S, T*S);
+   ctx.fillStyle='#ffffff';
+   ctx.font='28px sans-serif';
+   ctx.textAlign='center';
+   ctx.textBaseline='middle';
+   ctx.fillText('EXIT REACHED!', OFFSET_X + T*S/2, OFFSET_Y + T*S/2);
+ }
+
+ requestAnimationFrame(draw);
+}
+
+
+function serializeMaze(){
+ const data = { T, Q, tiles: [] };
+ for(let y=0;y<T;y++){
+  const row=[];
+  for(let x=0;x<T;x++){
+   const t=tiles[y][x];
+   const cell={type:t.type};
+   if(t.type==='STATIC') cell.walls = t.walls.slice();
+   if(t.type==='L' || t.type==='BAR'){
+     cell.st = t.st;
+   }
+   row.push(cell);
+  }
+  data.tiles.push(row);
+ }
+ return data;
+}
+
+function applyMazeFromObject(data){
+ if(!data || !data.tiles) return;
+ for(let y=0;y<T && y<data.tiles.length;y++){
+  for(let x=0;x<T && x<data.tiles[y].length;x++){
+   const cell=data.tiles[y][x];
+   if(!cell) continue;
+   if(cell.type==='STATIC'){
+     const t=makeStatic();
+     if(Array.isArray(cell.walls)) t.walls = cell.walls.slice();
+     tiles[y][x]=t;
+   } else if(cell.type==='L'){
+     const t=makeL();
+     if(typeof cell.st==='number') t.st=cell.st;
+     tiles[y][x]=t;
+   } else if(cell.type==='BAR'){
+     const t=makeB();
+     if(typeof cell.st==='number') t.st=cell.st;
+     tiles[y][x]=t;
+   } else if(cell.type==='EXIT'){
+     tiles[y][x]={type:'EXIT'};
+   }
+  }
+ }
+ // reset players & exit
+ px=1;py=9;
+ p2x=null;p2y=null;
+ exitReached=false;
+}
+
+function applyMaze(){
+ const ta=document.getElementById('mazeJson');
+ if(!ta) return;
+ try{
+  const data=JSON.parse(ta.value);
+  applyMazeFromObject(data);
+ }catch(e){
+  alert('Invalid JSON');
+ }
+}
+
+function restartMaze(){
+ // Generate a fresh random board (like a browser refresh)
+ for(let y=0;y<T;y++){
+  for(let x=0;x<T;x++){
+   tiles[y][x] = makeStatic();
+  }
+ }
+
+ // Re-apply interactive pattern and exit
+ tiles[2][2]=makeL();
+ tiles[1][2]=makeB();
+ tiles[3][2]=makeB();
+ tiles[2][1]=makeL();
+ tiles[2][3]=makeB();
+ tiles[0][4]={type:'EXIT'};
+
+ // Reset players and celebration
+ px=1;py=9;
+ p2x=null;p2y=null;
+ exitReached=false;
+
+ // Store snapshot of this new maze
+ initialMazeJson = serializeMaze();
+}
+
+function saveMaze(){
+ const data = serializeMaze();
+ const json = JSON.stringify(data, null, 2);
+ const ta = document.getElementById('mazeJson');
+ if(ta) ta.value = json;
+ if(navigator.clipboard && navigator.clipboard.writeText){
+   navigator.clipboard.writeText(json).catch(()=>{
+     console.log(json);
+   });
+ } else {
+   console.log(json);
+ }
+}
+
+
+
+function applyMazeFromTextarea(){
+ const ta = document.getElementById('mazeJson');
+ if(!ta) return;
+ try{
+   const data = JSON.parse(ta.value);
+   if(!data.tiles) throw new Error('No tiles field');
+   for(let y=0;y<T;y++){
+     for(let x=0;x<T;x++){
+       const cell = (data.tiles[y] && data.tiles[y][x]) || {type:'STATIC'};
+       let t;
+       if(cell.type==='STATIC'){
+         t = makeStatic();
+         if(Array.isArray(cell.walls)) t.walls = cell.walls.slice();
+       } else if(cell.type==='L'){
+         t = makeL();
+         if(typeof cell.st==='number') t.st = cell.st;
+       } else if(cell.type==='BAR'){
+         t = makeB();
+         if(typeof cell.st==='number') t.st = cell.st;
+       } else if(cell.type==='EXIT'){
+         t = {type:'EXIT'};
+       } else {
+         t = makeStatic();
+       }
+       tiles[y][x] = t;
+     }
+   }
+   // reset players and exit flag
+   px = 1; py = 9;
+   p2x = null; p2y = null;
+   exitReached = false;
+   alert('Maze applied from JSON.');
+ } catch(e){
+   alert('Invalid JSON: ' + e.message);
+ }
+}
+
+function copyJsonToClipboard(){
+ const ta = document.getElementById('mazeJson');
+ if(!ta) return;
+ const txt = ta.value;
+ if(navigator.clipboard && navigator.clipboard.writeText){
+   navigator.clipboard.writeText(txt).then(()=>{
+     alert('JSON copied to clipboard.');
+   }).catch(()=>{
+     console.log(txt);
+     alert('Could not copy. JSON logged to console.');
+   });
+ } else {
+   console.log(txt);
+   alert('Could not copy. JSON logged to console.');
+ }
+}
+
+function spawnP2(){
+ if(p2x!==null && p2y!==null) return;
+ p2x = 8; // right side, bottom row
+ p2y = 9;
+ exitReached = false;
+}
+
+function moveP1(dx,dy){
+ tryMove(dx,dy);
+}
+
+function moveP2(dx,dy){
+ if(p2x===null||p2y===null) return;
+ const ox=px, oy=py;
+ px=p2x; py=p2y;
+ tryMove(dx,dy);
+ p2x=px; p2y=py;
+ px=ox; py=oy;
+}
+
+document.addEventListener('keydown',e=>{
+ if(e.key=='ArrowUp')moveP1(0,-1);
+ if(e.key=='ArrowDown')moveP1(0,1);
+ if(e.key=='ArrowLeft')moveP1(-1,0);
+ if(e.key=='ArrowRight')moveP1(1,0);
+ if(e.key=='w'||e.key=='W')moveP2(0,-1);
+ if(e.key=='s'||e.key=='S')moveP2(0,1);
+ if(e.key=='a'||e.key=='A')moveP2(-1,0);
+ if(e.key=='d'||e.key=='D')moveP2(1,0);
+ if(e.key=='x' || e.key=='X') saveMaze();
+});
+
+document.getElementById('exportBtn').addEventListener('click',()=>saveMaze());
+document.getElementById('copyBtn').addEventListener('click',()=>copyJsonToClipboard());
+document.getElementById('applyBtn').addEventListener('click',()=>applyMazeFromTextarea());
+document.getElementById('applyBtn').addEventListener('click',()=>applyMaze());
+document.getElementById('spawn2pBtn').addEventListener('click',()=>spawnP2());
+document.getElementById('restartBtn').addEventListener('click',()=>restartMaze());
+
+
+document.getElementById('c').addEventListener('click',e=>{
+ const rect = e.target.getBoundingClientRect();
+ const mx = e.clientX - rect.left;
+ const my = e.clientY - rect.top;
+ const bx = mx - OFFSET_X;
+ const by = my - OFFSET_Y;
+ if(bx < 0 || by < 0 || bx >= T*S || by >= T*S) return;
+ const tx = Math.floor(bx / S);
+ const ty = Math.floor(by / S);
+ let t = tiles[ty][tx];
+ const order = ['STATIC','L','BAR','EXIT'];
+ let idx = order.indexOf(t.type);
+ if(idx === -1) idx = 0;
+ idx = (idx + 1) % order.length;
+ const nt = order[idx];
+ if(nt === 'STATIC') tiles[ty][tx] = makeStatic();
+ else if(nt === 'L') tiles[ty][tx] = makeL();
+ else if(nt === 'BAR') tiles[ty][tx] = makeB();
+ else if(nt === 'EXIT') tiles[ty][tx] = {type:'EXIT'};
+});
+
+draw();
+</script>
+</body>
+</html>
