@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Combined Board</title>
+<style>
+body{background:#111;margin:0;display:flex;justify-content:center;align-items:center;height:100vh}
+canvas{background:#000;border:4px solid #fff}
+</style>
+</head>
+<body>
+<canvas id="c" width="500" height="500"></canvas>
+<script>
+const T=5,Q=2,S=100,qS=50;
+const ctx=document.getElementById('c').getContext('2d');
+
+function rot(w){return[w[3],w[0],w[1],w[2]];}
+const SHAPES={
+ C:[1,1,1,1],
+ TD:[0,1,1,1],
+ CO:[1,0,0,1],
+ H:[0,1,0,1],
+ V:[1,0,1,0]
+};
+const KEYS=Object.keys(SHAPES);
+
+function makeStatic(){
+ let k=KEYS[Math.floor(Math.random()*KEYS.length)];
+ let w=SHAPES[k].slice();
+ let r=Math.floor(Math.random()*4);
+ while(r--)w=rot(w);
+ return{type:'STATIC',walls:w};
+}
+
+function makeL(){return{type:'L',st:0,moved:false,last:0};}
+function makeB(){return{type:'BAR',st:0,moved:false,last:0};}
+
+const LST={
+ 0:[1,1,0,0],
+ 1:[0,1,1,0],
+ 3:[1,0,0,1]
+};
+const BST={
+ 0:[1,0,1,0],
+ 1:[0,1,0,1]
+};
+
+let tiles=[...Array(T)].map(_=>Array(T).fill(0).map(_=>makeStatic()));
+
+tiles[2][2]=makeL();
+tiles[1][2]=makeB();
+tiles[3][2]=makeB();
+tiles[2][1]=makeL();
+tiles[2][3]=makeB();
+
+tiles[0][4]={type:'EXIT'};
+
+let px=1,py=9;
+
+function tileAt(qx,qy){
+ let tx=Math.floor(qx/Q),ty=Math.floor(qy/Q);
+ if(tx<0||ty<0||tx>=T||ty>=T)return null;
+ return{tile:tiles[ty][tx],tx,ty};
+}
+
+function quad(qx,qy){
+ let lx=qx%Q,ly=qy%Q;
+ if(lx==0&&ly==0)return 1;
+ if(lx==1&&ly==0)return 2;
+ if(lx==0&&ly==1)return 3;
+ return 4;
+}
+
+function rotDir(a,b){
+ const s=a+"->"+b;
+ if(["1->2","4->3","2->4","3->1"].includes(s))return 1;
+ if(["3->4","2->1","1->3","4->2"].includes(s))return -1;
+ return 0;
+}
+
+function blockStatic(tile,lx,ly,dx,dy){
+ let w=tile.walls;
+ if(dx!==0){
+   if((dx==1&&lx==0)||(dx==-1&&lx==1)){
+     return w[(ly==0)?0:2]==1;
+   }
+ }
+ if(dy!==0){
+   if((dy==1&&ly==0)||(dy==-1&&ly==1)){
+     return w[(lx==0)?3:1]==1;
+   }
+ }
+ return false;
+}
+
+function hasLWallBetween(tile,q1,q2){
+ let w=LST[tile.st];
+ function pair(a,b){return (q1===a&&q2===b)||(q1===b&&q2===a);}
+ // up arm blocks between Q1 and Q2
+ if(w[0] && pair(1,2)) return true;
+ // right arm blocks between Q2 and Q4
+ if(w[1] && pair(2,4)) return true;
+ // down arm blocks between Q3 and Q4
+ if(w[2] && pair(3,4)) return true;
+ // left arm blocks between Q1 and Q3
+ if(w[3] && pair(1,3)) return true;
+ return false;
+}
+
+function tryMove(dx,dy){
+ let nx=px+dx, ny=py+dy;
+ if(nx<0||ny<0||nx>=10||ny>=10)return;
+ let A=tileAt(px,py),B=tileAt(nx,ny);
+ if(!A||!B)return;
+ let same=A.tx==B.tx&&A.ty==B.ty;
+ let tile=A.tile;
+ let lx=px%2,ly=py%2;
+ let nlx=nx%2,nly=ny%2;
+ let q1=quad(px,py),q2=quad(nx,ny);
+
+ if(tile.type=='EXIT'){px=nx;py=ny;return;}
+
+ if(tile.type=='STATIC'&&same){
+   if(blockStatic(tile,lx,ly,dx,dy))return;
+   px=nx;py=ny;return;
+ }
+
+ if(tile.type=='L'&&same){
+   // Only rotate when the movement actually pushes against one of the L arms
+   if(!hasLWallBetween(tile,q1,q2)){
+     // no wall between these quadrants -> just walk through
+     px=nx;py=ny;return;
+   }
+   let d=rotDir(q1,q2);
+   if(d==0)return;
+   if(!tile.moved){
+     tile.moved=true;tile.last=d;
+     tile.st=(d==1?1:3);
+     px=nx;py=ny;return;
+   }else{
+     if(d==-tile.last){
+       tile.moved=false;tile.last=0;tile.st=0;
+       px=nx;py=ny;
+     }
+     return;
+   }
+ }
+
+ if(tile.type=='BAR'&&same){
+   let d=rotDir(q1,q2);
+   let w=BST[tile.st];
+   function blockBar(){
+     if(tile.st==0) return (q1==1&&q2==2)||(q1==2&&q2==1)||(q1==3&&q2==4)||(q1==4&&q2==3);
+     else return (q1==1&&q2==3)||(q1==3&&q2==1)||(q1==2&&q2==4)||(q1==4&&q2==2);
+   }
+   if(!blockBar()){px=nx;py=ny;return;}
+   if(d==0)return;
+   if(!tile.moved){
+     tile.moved=true;tile.last=d;tile.st=1-tile.st;px=nx;py=ny;return;
+   }else{
+     if(d==-tile.last){tile.moved=false;tile.last=0;tile.st=1-tile.st;px=nx;py=ny;}
+     return;
+   }
+ }
+
+ px=nx;py=ny;
+}
+
+function drawLabels(){
+ ctx.fillStyle='#ffffff';
+ ctx.font='14px sans-serif';
+ ctx.textAlign='center';
+ ctx.textBaseline='top';
+ const letters=['A','B','C','D','E'];
+ for(let x=0;x<T;x++){
+   const cx=x*S+S/2;
+   ctx.fillText(letters[x],cx,2);
+ }
+ ctx.textAlign='right';
+ ctx.textBaseline='middle';
+ for(let y=0;y<T;y++){
+   const cy=y*S+S/2;
+   const label=(y+1).toString();
+   ctx.fillText(label,14,cy);
+ }
+}
+
+function draw(){
+ ctx.clearRect(0,0,500,500);
+ for(let y=0;y<T;y++){
+  for(let x=0;x<T;x++){
+   let t=tiles[y][x],bx=x*S,by=y*S;
+   ctx.fillStyle='#333';ctx.fillRect(bx,by,S,S);
+
+   if(t.type=='STATIC'){
+     ctx.strokeStyle='#000';ctx.lineWidth=6;
+     ctx.beginPath();
+     let w=t.walls;
+     let cx=bx+S/2,cy=by+S/2;
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='L'){
+     let w=LST[t.st],cx=bx+S/2,cy=by+S/2;
+     ctx.strokeStyle=t.moved?'#ffa500':'#00aaff';
+     ctx.lineWidth=6;
+     ctx.beginPath();
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='BAR'){
+     let w=BST[t.st],cx=bx+S/2,cy=by+S/2;
+     ctx.strokeStyle=t.moved?'#ffa500':'#00aaff';
+     ctx.lineWidth=6;
+     ctx.beginPath();
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='EXIT'){
+     ctx.fillStyle='#ff66cc';
+     ctx.fillRect(bx+S/2,by+S/2,S/2,S/2);
+   }
+  }
+ }
+ let pxs=px*qS+qS/2,pys=py*qS+qS/2;
+ ctx.fillStyle='#0f0';
+ ctx.beginPath();
+ ctx.arc(pxs,pys,qS*0.3,0,Math.PI*2);
+ ctx.fill();
+ drawLabels();
+ requestAnimationFrame(draw);
+}
+
+document.addEventListener('keydown',e=>{
+ if(e.key=='ArrowUp')tryMove(0,-1);
+ if(e.key=='ArrowDown')tryMove(0,1);
+ if(e.key=='ArrowLeft')tryMove(-1,0);
+ if(e.key=='ArrowRight')tryMove(1,0);
+});
+
+document.getElementById('c').addEventListener('click',e=>{
+ const rect = e.target.getBoundingClientRect();
+ const mx = e.clientX - rect.left;
+ const my = e.clientY - rect.top;
+ const tx = Math.floor(mx / S);
+ const ty = Math.floor(my / S);
+ if(tx<0||ty<0||tx>=T||ty>=T) return;
+ let t = tiles[ty][tx];
+ const order = ['STATIC','L','BAR','EXIT'];
+ let idx = order.indexOf(t.type);
+ if(idx === -1) idx = 0;
+ idx = (idx + 1) % order.length;
+ const nt = order[idx];
+ if(nt === 'STATIC') tiles[ty][tx] = makeStatic();
+ else if(nt === 'L') tiles[ty][tx] = makeL();
+ else if(nt === 'BAR') tiles[ty][tx] = makeB();
+ else if(nt === 'EXIT') tiles[ty][tx] = {type:'EXIT'};
+});
+
+draw();
+</script>
+</body>
+</html>
