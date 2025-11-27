@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Static Wall Tiles Test</title>
+  <style>
+    body {
+      background: #1c1c1c;
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, sans-serif;
+      color: #eee;
+    }
+    .frame {
+      background: #202020;
+      padding: 16px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    canvas {
+      background: #111111;
+      border: 4px solid #f5f5f5;
+      display: block;
+    }
+    .label {
+      margin-top: 8px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <canvas id="game" width="500" height="500"></canvas>
+    <div class="label">Arrow keys to move. Static tiles only (no rotating walls).</div>
+  </div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  const TILE_COUNT = 5;
+  const QUADS_PER_TILE = 2;
+  const GRID_QUADS = TILE_COUNT * QUADS_PER_TILE; // 10x10 quadrants
+  const TILE_SIZE = canvas.width / TILE_COUNT;
+  const QUAD_SIZE = TILE_SIZE / QUADS_PER_TILE;
+
+  // walls index: [UP, RIGHT, DOWN, LEFT]
+  function rotateCW(w) {
+    // up->right, right->down, down->left, left->up
+    return [w[3], w[0], w[1], w[2]];
+  }
+
+  // Shape definitions in base orientation
+  const SHAPES = {
+    CROSS:   [1,1,1,1], // +
+    T_DOWN:  [0,1,1,1], // T with stem down
+    CORNER:  [1,0,0,1], // up + left
+    H_BAR:   [0,1,0,1], // horizontal
+    V_BAR:   [1,0,1,0]  // vertical
+  };
+  const SHAPE_KEYS = Object.keys(SHAPES);
+
+  function makeStaticTile() {
+    // pick random shape & random rotation
+    const key = SHAPE_KEYS[Math.floor(Math.random() * SHAPE_KEYS.length)];
+    let walls = SHAPES[key].slice();
+    const rotations = Math.floor(Math.random() * 4);
+    for (let i = 0; i < rotations; i++) {
+      walls = rotateCW(walls);
+    }
+    return {
+      type: 'STATIC',
+      walls,
+      shape: key
+    };
+  }
+
+  // Build grid filled entirely with static tiles
+  const tiles = [];
+  for (let ty = 0; ty < TILE_COUNT; ty++) {
+    tiles[ty] = [];
+    for (let tx = 0; tx < TILE_COUNT; tx++) {
+      tiles[ty][tx] = makeStaticTile();
+    }
+  }
+
+  // Player starts bottom-left tile, top-left quadrant of that tile
+  const player = {
+    qx: 1,
+    qy: GRID_QUADS - 1
+  };
+
+  function getTileAtQuad(qx, qy) {
+    const tx = Math.floor(qx / QUADS_PER_TILE);
+    const ty = Math.floor(qy / QUADS_PER_TILE);
+    if (tx < 0 || ty < 0 || tx >= TILE_COUNT || ty >= TILE_COUNT) return null;
+    return { tile: tiles[ty][tx], tx, ty };
+  }
+
+  function blockingWithinTile(tile, localQx, localQy, dx, dy) {
+    const walls = tile.walls;
+    if (dx !== 0) {
+      // crossing vertical internal boundary inside tile
+      if ((dx === 1 && localQx === 0) || (dx === -1 && localQx === 1)) {
+        const arm = (localQy === 0) ? 0 : 2; // UP or DOWN
+        return walls[arm] === 1;
+      }
+    } else if (dy !== 0) {
+      // crossing horizontal internal boundary inside tile
+      if ((dy === 1 && localQy === 0) || (dy === -1 && localQy === 1)) {
+        const arm = (localQx === 0) ? 3 : 1; // LEFT or RIGHT
+        return walls[arm] === 1;
+      }
+    }
+    return false;
+  }
+
+  function attemptMove(dx, dy) {
+    const nx = player.qx + dx;
+    const ny = player.qy + dy;
+    if (nx < 0 || ny < 0 || nx >= GRID_QUADS || ny >= GRID_QUADS) return;
+
+    const fromInfo = getTileAtQuad(player.qx, player.qy);
+    const toInfo   = getTileAtQuad(nx, ny);
+    if (!fromInfo || !toInfo) return;
+
+    const sameTile = (fromInfo.tx === toInfo.tx && fromInfo.ty === toInfo.ty);
+    const tile = fromInfo.tile;
+
+    const localQx = player.qx % QUADS_PER_TILE;
+    const localQy = player.qy % QUADS_PER_TILE;
+
+    if (sameTile) {
+      if (blockingWithinTile(tile, localQx, localQy, dx, dy)) {
+        return; // blocked by internal wall
+      }
+    }
+    // Only internal walls block; crossing tile borders is free.
+    player.qx = nx;
+    player.qy = ny;
+  }
+
+  function drawGrid() {
+    // tile borders
+    ctx.strokeStyle = '#333333';
+    ctx.lineWidth = 2;
+    for (let i = 0; i <= TILE_COUNT; i++) {
+      const p = i * TILE_SIZE;
+      ctx.beginPath();
+      ctx.moveTo(p, 0);
+      ctx.lineTo(p, canvas.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, p);
+      ctx.lineTo(canvas.width, p);
+      ctx.stroke();
+    }
+
+    // quadrant grid (subtle)
+    ctx.strokeStyle = '#222222';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= GRID_QUADS; i++) {
+      const p = i * QUAD_SIZE;
+      ctx.beginPath();
+      ctx.moveTo(p, 0);
+      ctx.lineTo(p, canvas.height);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, p);
+      ctx.lineTo(canvas.width, p);
+      ctx.stroke();
+    }
+  }
+
+  function drawTiles() {
+    for (let ty = 0; ty < TILE_COUNT; ty++) {
+      for (let tx = 0; tx < TILE_COUNT; tx++) {
+        const tile = tiles[ty][tx];
+        const baseX = tx * TILE_SIZE;
+        const baseY = ty * TILE_SIZE;
+
+        // background
+        ctx.fillStyle = '#555555';
+        ctx.fillRect(baseX, baseY, TILE_SIZE, TILE_SIZE);
+
+        const cx = baseX + TILE_SIZE / 2;
+        const cy = baseY + TILE_SIZE / 2;
+        const [up, right, down, left] = tile.walls;
+
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        if (up) {
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx, baseY);
+        }
+        if (right) {
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(baseX + TILE_SIZE, cy);
+        }
+        if (down) {
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(cx, baseY + TILE_SIZE);
+        }
+        if (left) {
+          ctx.moveTo(cx, cy);
+          ctx.lineTo(baseX, cy);
+        }
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawPlayer() {
+    const px = player.qx * QUAD_SIZE + QUAD_SIZE / 2;
+    const py = player.qy * QUAD_SIZE + QUAD_SIZE / 2;
+    ctx.fillStyle = '#55ff55';
+    ctx.beginPath();
+    ctx.arc(px, py, QUAD_SIZE * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawGrid();
+    drawTiles();
+    drawPlayer();
+    requestAnimationFrame(draw);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp') attemptMove(0,-1);
+    else if (e.key === 'ArrowDown') attemptMove(0,1);
+    else if (e.key === 'ArrowLeft') attemptMove(-1,0);
+    else if (e.key === 'ArrowRight') attemptMove(1,0);
+  });
+
+  draw();
+})();
+</script>
+</body>
+</html>
