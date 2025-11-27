@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>The Amazing Maze</title>
+<style>
+  body{
+    margin:0;
+    background:#111;
+    color:#fff;
+    font-family:Arial, sans-serif;
+  }
+  #wrap{
+    display:flex;
+    padding:20px;
+    box-sizing:border-box;
+  }
+  #leftPane{
+    flex:0 0 auto;
+  }
+  #rightPane{
+    flex:1 1 auto;
+    margin-left:40px;
+  }
+  #c{
+    border:2px solid #fff;
+    background:#111;
+    outline:none;
+    display:block;
+  }
+  h1{
+    margin-top:0;
+  }
+  textarea{
+    width:100%;
+    height:200px;
+    background:#111;
+    color:#fff;
+    border:1px solid #555;
+    box-sizing:border-box;
+    padding:4px;
+    font-family:monospace;
+    font-size:12px;
+  }
+  button{
+    margin-right:6px;
+    margin-top:6px;
+  }
+  label{
+    margin-right:10px;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="leftPane">
+    <canvas id="c" width="600" height="600" tabindex="0"></canvas>
+  </div>
+  <div id="rightPane">
+    <h1>THE AMAZING MAZE</h1>
+    <p>
+      Use the arrow keys to move Player 1 (green). Use <strong>WASD</strong> to move Player 2 (yellow)
+      after spawning with the <strong>2P</strong> button. Reach the pink EXIT tile.
+    </p>
+    <p>
+      Click any tile to cycle between static walls, L-walls, bar-walls and exit. The difficulty slider
+      controls how many extra border walls interactive tiles get.
+    </p>
+    <p>
+      You can export and edit the maze layout as JSON. Press <strong>S</strong> or click "Export" to dump
+      the current maze.
+    </p>
+
+    <p>
+      Difficulty:
+      <span>Easy</span>
+      <input type="range" id="difficultySlider" min="0" max="4" value="1">
+      <span>Hard</span>
+      <span id="difficultyValue">(level 1 → 2 extra walls)</span>
+    </p>
+
+    <textarea id="mazeJson" placeholder="Maze JSON will appear here when you click Export."></textarea><br>
+
+    <button id="exportBtn">Export</button>
+    <button id="copyBtn">Copy</button>
+    <button id="applyBtn">Apply</button>
+    <button id="spawn2pBtn">2P</button>
+    <button id="refreshBtn">Refresh</button>
+  </div>
+</div>
+
+<script>
+const T=5,Q=2,S=100,qS=50;
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+
+const OFFSET_X=40, OFFSET_Y=40;
+
+let exitReached=false;
+// 0..4 → difficulty level for extra perim walls
+let difficultyLevel = 1; // default matches old "hard" with 2 walls
+
+// helper: generate perim array (8 half-edge flags) with N random walls
+function makePerim(numWalls){
+  const per = new Array(8).fill(0);
+  if(numWalls <= 0) return per;
+  let choices = [...Array(8).keys()];
+  for(let k=0;k<numWalls && choices.length>0;k++){
+    const idx = Math.floor(Math.random()*choices.length);
+    const pick = choices.splice(idx,1)[0];
+    per[pick]=1;
+  }
+  return per;
+}
+
+// map difficultyLevel (0..4) → number of extra walls
+function extraWallsForLevel(level){
+  switch(level){
+    case 0: return 0;
+    case 1: return 2;
+    case 2: return 3;
+    case 3: return 4;
+    case 4: return 5;
+    default: return 0;
+  }
+}
+
+// angles for animation (degrees)
+const angleForStL = {0:0, 1:90, 3:-90};
+const angleForStBar = {0:0, 1:90};
+
+// tile factories ---------------------------------------------------------
+
+function rot(w){return[w[3],w[0],w[1],w[2]];}
+const SHAPES={
+ C:[1,1,1,1],
+ TD:[0,1,1,1],
+ CO:[1,0,0,1],
+ H:[0,1,0,1],
+ V:[1,0,1,0]
+};
+const KEYS=Object.keys(SHAPES);
+
+function makeStatic(){
+ let k=KEYS[Math.floor(Math.random()*KEYS.length)];
+ let w=SHAPES[k].slice();
+ let r=Math.floor(Math.random()*4);
+ while(r--)w=rot(w);
+ return{type:'STATIC',walls:w};
+}
+
+function makeL(){
+  return{
+    type:'L',
+    st:0,
+    moved:false,
+    last:0,
+    perim:new Array(8).fill(0),
+    angle:angleForStL[0],
+    animating:false,
+    animStartAngle:0,
+    animEndAngle:0,
+    animProgress:0
+  };
+}
+
+function makeB(){
+  return{
+    type:'BAR',
+    st:0,
+    moved:false,
+    last:0,
+    perim:new Array(8).fill(0),
+    angle:angleForStBar[0],
+    animating:false,
+    animStartAngle:0,
+    animEndAngle:0,
+    animProgress:0
+  };
+}
+
+const LST={
+ 0:[1,1,0,0],
+ 1:[0,1,1,0],
+ 3:[1,0,0,1]
+};
+const BST={
+ 0:[1,0,1,0],
+ 1:[0,1,0,1]
+};
+
+// board state -----------------------------------------------------------
+
+let tiles=[...Array(T)].map(_=>Array(T).fill(0).map(_=>makeStatic()));
+let px=1,py=9;
+let p2x=null,p2y=null;
+
+// apply difficulty rules to all existing interactive tiles
+function applyDifficultyPerim(){
+  const extra = extraWallsForLevel(difficultyLevel);
+  for(let y=0;y<T;y++){
+    for(let x=0;x<T;x++){
+      const t = tiles[y][x];
+      if(!t || (t.type!=='L' && t.type!=='BAR')) continue;
+      if(extra > 0){
+        t.perim = makePerim(extra);
+      }else{
+        t.perim = new Array(8).fill(0);
+      }
+    }
+  }
+}
+
+// regenerate whole board
+function initTiles(){
+  // all static first
+  tiles=[...Array(T)].map(_=>Array(T).fill(0).map(_=>makeStatic()));
+
+  // choose candidate positions for interactive tiles (avoid start A5 and exit E1)
+  const spots=[];
+  for(let ty=0;ty<T;ty++){
+    for(let tx=0;tx<T;tx++){
+      if(tx===0 && ty===4) continue; // start
+      if(tx===4 && ty===0) continue; // exit
+      spots.push({tx,ty});
+    }
+  }
+  // shuffle spots
+  for(let i=spots.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    const tmp=spots[i];spots[i]=spots[j];spots[j]=tmp;
+  }
+  const N=Math.min(6,spots.length);
+  for(let i=0;i<N;i++){
+    const {tx,ty}=spots[i];
+    if(i%2===0) tiles[ty][tx]=makeL(); else tiles[ty][tx]=makeB();
+  }
+
+  // EXIT tile
+  tiles[0][4]={type:'EXIT'};
+
+  // reset players & exit flag
+  px=1;py=9;
+  p2x=null;p2y=null;
+  exitReached=false;
+
+  // apply difficulty
+  applyDifficultyPerim();
+}
+
+// coordinate helpers ----------------------------------------------------
+
+function tileAt(qx,qy){
+ let tx=Math.floor(qx/Q),ty=Math.floor(qy/Q);
+ if(tx<0||ty<0||tx>=T||ty>=T)return null;
+ return{tile:tiles[ty][tx],tx,ty};
+}
+
+function quad(qx,qy){
+ let lx=qx%Q,ly=qy%Q;
+ if(lx==0&&ly==0)return 1;
+ if(lx==1&&ly==0)return 2;
+ if(lx==0&&ly==1)return 3;
+ return 4;
+}
+
+function rotDir(a,b){
+ const s=a+"->"+b;
+ if(["1->2","4->3","2->4","3->1"].includes(s))return 1;
+ if(["3->4","2->1","1->3","4->2"].includes(s))return -1;
+ return 0;
+}
+
+function blockStatic(tile,lx,ly,dx,dy){
+ let w=tile.walls;
+ if(dx!==0){
+   if((dx==1&&lx==0)||(dx==-1&&lx==1)){
+     return w[(ly==0)?0:2]==1;
+   }
+ }
+ if(dy!==0){
+   if((dy==1&&ly==0)||(dy==-1&&ly==1)){
+     return w[(lx==0)?3:1]==1;
+   }
+ }
+ return false;
+}
+
+function hasLWallBetween(tile,q1,q2){
+ let w=LST[tile.st];
+ function pair(a,b){return (q1===a&&q2===b)||(q1===b&&q2===a);}
+ if(w[0] && pair(1,2)) return true; // up arm
+ if(w[1] && pair(2,4)) return true; // right arm
+ if(w[2] && pair(3,4)) return true; // down arm
+ if(w[3] && pair(1,3)) return true; // left arm
+ return false;
+}
+
+// perim blocking and drawing -------------------------------------------
+
+// quadrant-aware half-edge blocking
+function edgeBlockedByPerim(A,B,dx,dy,qx,qy){
+ const a=A.tile, b=B.tile;
+ const pa=(a && Array.isArray(a.perim))?a.perim:null;
+ const pb=(b && Array.isArray(b.perim))?b.perim:null;
+ function has(p,i){return p && p[i];}
+
+ // Moving RIGHT: cross A's right edge, B's left edge
+ if(dx===1){
+   const topHalf = (qy % 2 === 0); // even row => top quadrants
+   if(topHalf){
+     // A: right-top (2), B: left-top (7)
+     if(has(pa,2) || has(pb,7)) return true;
+   } else {
+     // A: right-bottom (3), B: left-bottom (6)
+     if(has(pa,3) || has(pb,6)) return true;
+   }
+ }
+
+ // Moving LEFT: cross A's left edge, B's right edge
+ if(dx===-1){
+   const topHalf = (qy % 2 === 0);
+   if(topHalf){
+     // A: left-top (7), B: right-top (2)
+     if(has(pa,7) || has(pb,2)) return true;
+   } else {
+     // A: left-bottom (6), B: right-bottom (3)
+     if(has(pa,6) || has(pb,3)) return true;
+   }
+ }
+
+ // Moving DOWN: cross A's bottom edge, B's top edge
+ if(dy===1){
+   const leftHalf = (qx % 2 === 0); // even column => left quadrants
+   if(leftHalf){
+     // A: bottom-left (5), B: top-left (0)
+     if(has(pa,5) || has(pb,0)) return true;
+   } else {
+     // A: bottom-right (4), B: top-right (1)
+     if(has(pa,4) || has(pb,1)) return true;
+   }
+ }
+
+ // Moving UP: cross A's top edge, B's bottom edge
+ if(dy===-1){
+   const leftHalf = (qx % 2 === 0);
+   if(leftHalf){
+     // A: top-left (0), B: bottom-left (5)
+     if(has(pa,0) || has(pb,5)) return true;
+   } else {
+     // A: top-right (1), B: bottom-right (4)
+     if(has(pa,1) || has(pb,4)) return true;
+   }
+ }
+
+ return false;
+}
+
+function drawPerimWalls(t, bx, by){
+  if (!Array.isArray(t.perim)) return;
+
+  ctx.strokeStyle = '#000';     // same style as static walls
+  ctx.lineWidth   = 6;
+
+  const half = S / 2;
+  const inset = 1;              // pull slightly off the outer pixel edge
+  const left   = bx + inset;
+  const right  = bx + S - inset;
+  const top    = by + inset;
+  const bottom = by + S - inset;
+  const midX   = bx + half;
+  const midY   = by + half;
+
+  ctx.beginPath();
+
+  if (t.perim[0]) { ctx.moveTo(left, top);    ctx.lineTo(midX, top); }
+  if (t.perim[1]) { ctx.moveTo(midX, top);    ctx.lineTo(right, top); }
+
+  if (t.perim[2]) { ctx.moveTo(right, top);   ctx.lineTo(right, midY); }
+  if (t.perim[3]) { ctx.moveTo(right, midY);  ctx.lineTo(right, bottom); }
+
+  if (t.perim[4]) { ctx.moveTo(right, bottom);ctx.lineTo(midX, bottom); }
+  if (t.perim[5]) { ctx.moveTo(midX, bottom); ctx.lineTo(left, bottom); }
+
+  if (t.perim[6]) { ctx.moveTo(left, bottom); ctx.lineTo(left, midY); }
+  if (t.perim[7]) { ctx.moveTo(left, midY);   ctx.lineTo(left, top); }
+
+  ctx.stroke();
+}
+
+// animation helpers for L and BAR --------------------------------------
+
+function startLAnim(tile, oldSt, newSt){
+  const a0 = angleForStL[oldSt] ?? 0;
+  const a1 = angleForStL[newSt] ?? 0;
+  let delta = a1 - a0;
+  if(delta > 180) delta -= 360;
+  if(delta < -180) delta += 360;
+  tile.animStartAngle = a0;
+  tile.animEndAngle = a0 + delta;
+  tile.animProgress = 0;
+  tile.animating = true;
+  tile.angle = a0;
+}
+
+function updateLAnim(tile){
+  if(!tile.animating) return;
+  tile.animProgress += 0.2; // animation speed
+  if(tile.animProgress >= 1){
+    tile.animProgress = 1;
+    tile.animating = false;
+    tile.angle = tile.animEndAngle;
+  }else{
+    tile.angle = tile.animStartAngle +
+      (tile.animEndAngle - tile.animStartAngle)*tile.animProgress;
+  }
+}
+
+function startBarAnim(tile, oldSt, newSt){
+  const a0 = angleForStBar[oldSt] ?? 0;
+  const a1 = angleForStBar[newSt] ?? 0;
+  let delta = a1 - a0;
+  if(delta > 180) delta -= 360;
+  if(delta < -180) delta += 360;
+  tile.animStartAngle = a0;
+  tile.animEndAngle = a0 + delta;
+  tile.animProgress = 0;
+  tile.animating = true;
+  tile.angle = a0;
+}
+
+function updateBarAnim(tile){
+  if(!tile.animating) return;
+  tile.animProgress += 0.2; // animation speed
+  if(tile.animProgress >= 1){
+    tile.animProgress = 1;
+    tile.animating = false;
+    tile.angle = tile.animEndAngle;
+  }else{
+    tile.angle = tile.animStartAngle +
+      (tile.animEndAngle - tile.animStartAngle)*tile.animProgress;
+  }
+}
+
+// movement --------------------------------------------------------------
+
+function tryMove(dx,dy){
+ let nx=px+dx, ny=py+dy;
+ if(nx<0||ny<0||nx>=10||ny>=10)return;
+ let A=tileAt(px,py),B=tileAt(nx,ny);
+ if(!A||!B)return;
+ let same=A.tx==B.tx&&A.ty==B.ty;
+ let tile=A.tile;
+ let lx=px%2,ly=py%2;
+ let nlx=nx%2,nly=ny%2;
+ let q1=quad(px,py),q2=quad(nx,ny);
+
+ if(!same){
+   if(edgeBlockedByPerim(A,B,dx,dy,px,py)) return;
+ }
+
+ if(B.tile.type=='EXIT'){
+   if(nlx===1 && nly===1){
+     px=nx;py=ny;
+     exitReached=true;
+   } else {
+     px=nx;py=ny;
+   }
+   return;
+ }
+
+ if(tile.type=='STATIC'&&same){
+   if(blockStatic(tile,lx,ly,dx,dy))return;
+   px=nx;py=ny;return;
+ }
+
+ if(tile.type=='L'&&same){
+   if(!hasLWallBetween(tile,q1,q2)){
+     px=nx;py=ny;return;
+   }
+   let d=rotDir(q1,q2);
+   if(d==0)return;
+
+   if(!tile.moved){
+     let oldSt = tile.st;
+     tile.moved=true;
+     tile.last=d;
+     let newSt = (d==1?1:3);
+     tile.st = newSt;
+     startLAnim(tile, oldSt, newSt);
+     px=nx;py=ny;return;
+   }else{
+     if(d==-tile.last){
+       let oldSt = tile.st; // 1 or 3
+       tile.moved=false;
+       tile.last=0;
+       let newSt = 0;
+       tile.st = newSt;
+       startLAnim(tile, oldSt, newSt);
+       px=nx;py=ny;
+     }
+     return;
+   }
+ }
+
+ if(tile.type=='BAR'&&same){
+   let d=rotDir(q1,q2);
+   function blockBar(){
+     if(tile.st==0) return (q1==1&&q2==2)||(q1==2&&q2==1)||(q1==3&&q2==4)||(q1==4&&q2==3);
+     else return (q1==1&&q2==3)||(q1==3&&q2==1)||(q1==2&&q2==4)||(q1==4&&q2==2);
+   }
+   if(!blockBar()){px=nx;py=ny;return;}
+   if(d==0)return;
+
+   if(!tile.moved){
+     let oldSt = tile.st;
+     tile.moved=true;
+     tile.last=d;
+     let newSt = 1 - tile.st;
+     tile.st = newSt;
+     startBarAnim(tile, oldSt, newSt);
+     px=nx;py=ny;return;
+   }else{
+     if(d==-tile.last){
+       let oldSt = tile.st;
+       tile.moved=false;
+       tile.last=0;
+       let newSt = 1 - tile.st;
+       tile.st = newSt;
+       startBarAnim(tile, oldSt, newSt);
+       px=nx;py=ny;
+     }
+     return;
+   }
+ }
+
+ px=nx;py=ny;
+}
+
+// drawing ---------------------------------------------------------------
+
+function drawLabels(){
+ ctx.fillStyle='#ffffff';
+ ctx.font='14px sans-serif';
+
+ // column letters above
+ ctx.textAlign='center';
+ ctx.textBaseline='bottom';
+ const letters=['A','B','C','D','E'];
+ for(let x=0;x<T;x++){
+   const cx = OFFSET_X + x*S + S/2;
+   const cy = OFFSET_Y - 6;
+   ctx.fillText(letters[x], cx, cy);
+ }
+
+ // row numbers to the left
+ ctx.textAlign='right';
+ ctx.textBaseline='middle';
+ for(let y=0;y<T;y++){
+   const cy = OFFSET_Y + y*S + S/2;
+   const label = (y+1).toString();
+   const xPos = OFFSET_X - 6;
+   ctx.fillText(label, xPos, cy);
+ }
+}
+
+function draw(){
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+
+ ctx.save();
+ ctx.translate(OFFSET_X, OFFSET_Y);
+
+ for(let y=0;y<T;y++){
+  for(let x=0;x<T;x++){
+   let t=tiles[y][x],bx=x*S,by=y*S;
+   ctx.fillStyle='#333';ctx.fillRect(bx,by,S,S);
+
+   if(t.type=='STATIC'){
+     ctx.strokeStyle='#000';ctx.lineWidth=6;
+     ctx.beginPath();
+     let w=t.walls;
+     let cx=bx+S/2,cy=by+S/2;
+     if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+     if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+     if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+     if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+     ctx.stroke();
+   }
+
+   if(t.type=='L'){
+     // update animation
+     updateLAnim(t);
+
+     let cx=bx+S/2,cy=by+S/2;
+     ctx.strokeStyle=t.moved?'#ffa500':'#00aaff';
+     ctx.lineWidth=6;
+
+     if(t.animating){
+       // animated rotating L: two arms at angle-90° and angle°
+       const len = S/2;
+       const baseRad = t.angle * Math.PI/180;
+
+       const a1 = baseRad - Math.PI/2;
+       const a2 = baseRad;
+
+       const x1 = cx + Math.cos(a1)*len;
+       const y1 = cy + Math.sin(a1)*len;
+       const x2 = cx + Math.cos(a2)*len;
+       const y2 = cy + Math.sin(a2)*len;
+
+       ctx.beginPath();
+       ctx.moveTo(cx,cy); ctx.lineTo(x1,y1);
+       ctx.moveTo(cx,cy); ctx.lineTo(x2,y2);
+       ctx.stroke();
+     } else {
+       // classic axis-aligned L using LST
+       ctx.beginPath();
+       let w=LST[t.st];
+       if(w){
+         if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+         if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+         if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+         if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+       }
+       ctx.stroke();
+     }
+
+     drawPerimWalls(t, bx, by);
+   }
+
+   if(t.type=='BAR'){
+     // update animation
+     updateBarAnim(t);
+
+     let cx=bx+S/2,cy=by+S/2;
+     ctx.strokeStyle=t.moved?'#ffa500':'#00aaff';
+     ctx.lineWidth=6;
+
+     if(t.animating){
+       // animated rotating bar: single beam through center
+       const len = S/2;
+       const rad = t.angle * Math.PI/180;
+       const dx = Math.cos(rad)*len;
+       const dy = Math.sin(rad)*len;
+       ctx.beginPath();
+       ctx.moveTo(cx-dx,cy-dy);
+       ctx.lineTo(cx+dx,cy+dy);
+       ctx.stroke();
+     } else {
+       // classic axis-aligned bar using BST
+       ctx.beginPath();
+       let w=BST[t.st];
+       if(w){
+         if(w[0]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by);}
+         if(w[1]){ctx.moveTo(cx,cy);ctx.lineTo(bx+S,cy);}
+         if(w[2]){ctx.moveTo(cx,cy);ctx.lineTo(cx,by+S);}
+         if(w[3]){ctx.moveTo(cx,cy);ctx.lineTo(bx,cy);}
+       }
+       ctx.stroke();
+     }
+
+     drawPerimWalls(t, bx, by);
+   }
+
+   if(t.type=='EXIT'){
+     ctx.fillStyle='#ff66cc';
+     ctx.fillRect(bx+S/2,by+S/2,S/2,S/2);
+   }
+  }
+ }
+
+ // player 1
+ let pxs=px*qS+qS/2,pys=py*qS+qS/2;
+ ctx.fillStyle='#0f0';
+ ctx.beginPath();
+ ctx.arc(pxs,pys,qS*0.3,0,Math.PI*2);
+ ctx.fill();
+
+ ctx.restore();
+
+ // player 2 (draw in board space)
+ if(p2x!==null && p2y!==null){
+  let p2xs=p2x*qS+qS/2,p2ys=p2y*qS+qS/2;
+  ctx.save();
+  ctx.translate(OFFSET_X, OFFSET_Y);
+  ctx.fillStyle='#ffcc00';
+  ctx.beginPath();
+  ctx.arc(p2xs,p2ys,qS*0.3,0,Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+ }
+
+ drawLabels();
+
+ if(exitReached){
+   ctx.fillStyle='rgba(255,102,204,0.2)';
+   ctx.fillRect(OFFSET_X, OFFSET_Y, T*S, T*S);
+   ctx.fillStyle='#ffffff';
+   ctx.font='28px sans-serif';
+   ctx.textAlign='center';
+   ctx.textBaseline='middle';
+   ctx.fillText('EXIT REACHED!', OFFSET_X + T*S/2, OFFSET_Y + T*S/2);
+ }
+
+ requestAnimationFrame(draw);
+}
+
+// JSON helpers ----------------------------------------------------------
+
+function serializeMaze(){
+ const data = { T, Q, tiles: [] };
+ for(let y=0;y<T;y++){
+  const row=[];
+  for(let x=0;x<T;x++){
+   const t=tiles[y][x];
+   const cell={type:t.type};
+   if(t.type==='STATIC') cell.walls = t.walls.slice();
+   if(t.type==='L' || t.type==='BAR'){
+     cell.st = t.st;
+     if(Array.isArray(t.perim)) cell.perim = t.perim.slice();
+   }
+   row.push(cell);
+  }
+  data.tiles.push(row);
+ }
+ return data;
+}
+
+function applyMazeFromObject(data){
+ if(!data || !data.tiles) return;
+ for(let y=0;y<T && y<data.tiles.length;y++){
+  for(let x=0;x<T && x<data.tiles[y].length;x++){
+   const cell=data.tiles[y][x];
+   if(!cell) continue;
+   if(cell.type==='STATIC'){
+     const t=makeStatic();
+     if(Array.isArray(cell.walls)) t.walls = cell.walls.slice();
+     tiles[y][x]=t;
+   } else if(cell.type==='L'){
+     const t=makeL();
+     if(typeof cell.st==='number') t.st=cell.st;
+     if(Array.isArray(cell.perim) && cell.perim.length===8) t.perim = cell.perim.slice();
+     t.angle = angleForStL[t.st] ?? 0;
+     t.animating = false;
+     t.animProgress = 0;
+     tiles[y][x]=t;
+   } else if(cell.type==='BAR'){
+     const t=makeB();
+     if(typeof cell.st==='number') t.st=cell.st;
+     if(Array.isArray(cell.perim) && cell.perim.length===8) t.perim = cell.perim.slice();
+     t.angle = angleForStBar[t.st] ?? 0;
+     t.animating = false;
+     t.animProgress = 0;
+     tiles[y][x]=t;
+   } else if(cell.type==='EXIT'){
+     tiles[y][x]={type:'EXIT'};
+   }
+  }
+ }
+ px=1;py=9;
+ p2x=null;p2y=null;
+ exitReached=false;
+ applyDifficultyPerim(); // ensure perim matches current slider
+}
+
+function saveMaze(){
+ const data = serializeMaze();
+ const json = JSON.stringify(data, null, 2);
+ const ta = document.getElementById('mazeJson');
+ if(ta) ta.value = json;
+ if(navigator.clipboard && navigator.clipboard.writeText){
+   navigator.clipboard.writeText(json).catch(()=>{
+     console.log(json);
+   });
+ } else {
+   console.log(json);
+ }
+}
+
+function applyMazeFromTextarea(){
+ const ta = document.getElementById('mazeJson');
+ if(!ta) return;
+ try{
+   const data = JSON.parse(ta.value);
+   applyMazeFromObject(data);
+   alert('Maze applied from JSON.');
+ } catch(e){
+   alert('Invalid JSON: ' + e.message);
+ }
+}
+
+function copyJsonToClipboard(){
+ const ta = document.getElementById('mazeJson');
+ if(!ta) return;
+ const txt = ta.value;
+ if(navigator.clipboard && navigator.clipboard.writeText){
+   navigator.clipboard.writeText(txt).then(()=>{
+     alert('JSON copied to clipboard.');
+   }).catch(()=>{
+     console.log(txt);
+     alert('Could not copy. JSON logged to console.');
+   });
+ } else {
+   console.log(txt);
+   alert('Could not copy. JSON logged to console.');
+ }
+}
+
+// players & controls ----------------------------------------------------
+
+function spawnP2(){
+ if(p2x!==null && p2y!==null) return;
+ p2x = 8; // right side bottom row in quadrant coords
+ p2y = 9;
+ exitReached = false;
+}
+
+function moveP1(dx,dy){
+ tryMove(dx,dy);
+}
+
+function moveP2(dx,dy){
+ if(p2x===null||p2y===null) return;
+ const ox=px, oy=py;
+ px=p2x; py=p2y;
+ tryMove(dx,dy);
+ p2x=px; p2y=py;
+ px=ox; py=oy;
+}
+
+// events ---------------------------------------------------------------
+
+document.addEventListener('keydown',e=>{
+ if(e.key=='ArrowUp')moveP1(0,-1);
+ if(e.key=='ArrowDown')moveP1(0,1);
+ if(e.key=='ArrowLeft')moveP1(-1,0);
+ if(e.key=='ArrowRight')moveP1(1,0);
+ if(e.key=='w'||e.key=='W')moveP2(0,-1);
+ if(e.key=='s'||e.key=='S')moveP2(0,1);
+ if(e.key=='a'||e.key=='A')moveP2(-1,0);
+ if(e.key=='d'||e.key=='D')moveP2(1,0);
+ if(e.key=='x'||e.key=='X') saveMaze();
+});
+
+document.getElementById('exportBtn').addEventListener('click',()=>saveMaze());
+document.getElementById('copyBtn').addEventListener('click',()=>copyJsonToClipboard());
+document.getElementById('applyBtn').addEventListener('click',()=>applyMazeFromTextarea());
+document.getElementById('spawn2pBtn').addEventListener('click',()=>spawnP2());
+document.getElementById('refreshBtn').addEventListener('click',()=>{
+  initTiles();
+  canvas.focus();
+});
+
+// difficulty slider events
+const diffSlider = document.getElementById('difficultySlider');
+const diffValue = document.getElementById('difficultyValue');
+
+if(diffSlider){
+  diffSlider.addEventListener('input',()=>{
+    difficultyLevel = parseInt(diffSlider.value,10);
+    const extra = extraWallsForLevel(difficultyLevel);
+    if(diffValue){
+      diffValue.textContent = `(level ${difficultyLevel} → ${extra} extra walls)`;
+    }
+    applyDifficultyPerim();
+    canvas.focus();
+  });
+
+  // initial label text
+  const extra0 = extraWallsForLevel(difficultyLevel);
+  if(diffValue){
+    diffValue.textContent = `(level ${difficultyLevel} → ${extra0} extra walls)`;
+  }
+}
+
+canvas.addEventListener('click',e=>{
+ const rect = canvas.getBoundingClientRect();
+ const mx = e.clientX - rect.left;
+ const my = e.clientY - rect.top;
+ const bx = mx - OFFSET_X;
+ const by = my - OFFSET_Y;
+ if(bx < 0 || by < 0 || bx >= T*S || by >= T*S) return;
+ const tx = Math.floor(bx / S);
+ const ty = Math.floor(by / S);
+ let t = tiles[ty][tx];
+ const order = ['STATIC','L','BAR','EXIT'];
+ let idx = order.indexOf(t.type);
+ if(idx === -1) idx = 0;
+ idx = (idx + 1) % order.length;
+ const nt = order[idx];
+ if(nt === 'STATIC') tiles[ty][tx] = makeStatic();
+ else if(nt === 'L') tiles[ty][tx] = makeL();
+ else if(nt === 'BAR') tiles[ty][tx] = makeB();
+ else if(nt === 'EXIT') tiles[ty][tx] = {type:'EXIT'};
+});
+
+initTiles();
+draw();
+canvas.focus();
+</script>
+</body>
+</html>
